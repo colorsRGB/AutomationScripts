@@ -239,8 +239,14 @@ def test_login():
     try:
         print("1) Логин…")
         driver.get("https://gpt3.uat.vivai.ai/auth/login?returnUrl=%2Fdashboard")
-        wait.until(EC.presence_of_element_located((By.NAME, "username"))).send_keys("vladimir.t")
-        wait.until(EC.presence_of_element_located((By.NAME, "password"))).send_keys("6&5>8x#2N")
+
+        username = os.getenv("VIVAI_USER", "")
+        password = os.getenv("VIVAI_PASS", "")
+        if not username or not password:
+            raise RuntimeError("Нет логина/пароля в переменных окружения VIVAI_USER / VIVAI_PASS")
+
+        wait.until(EC.presence_of_element_located((By.NAME, "username"))).send_keys(username)
+        wait.until(EC.presence_of_element_located((By.NAME, "password"))).send_keys(password)
         wait.until(EC.element_to_be_clickable((By.ID, "kt_sign_in_submit"))).click()
 
         print("2) Chats → Direct…")
