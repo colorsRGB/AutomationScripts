@@ -22,16 +22,15 @@ SEL_INPUT_USERID = "#userId"
 SEL_BTN_START = ".key-t91e19"         # Start chat
 SEL_INPUT_MESSAGE = ".key-jml02v"
 SEL_SEND_ICONS = "svg.key-b44e5x"     # как правило, 2-я иконка — отправка
-SEL_CLOSE_BUTTON = ".key-1cfsorn"  #Для закрытия
-TOTAL_CHATS = 50         # всего сессий
-CONCURRENCY = 50            # одновременных сессий
+SEL_CLOSE_BUTTON = ".key-1cfsorn"     # для закрытия
+TOTAL_CHATS = 10         # всего сессий
+CONCURRENCY = 50         # одновременных сессий
 MESSAGE_TEXT = "Test message"
-TIMEOUT_MS = 15000          # мс ожиданий на действия
-RETRIES = 2                 # доп. попытки на один чат (в сумме 1 + RETRIES)
-POST_SEND_PAUSE_MS = 300    # пауза после отправки
+TIMEOUT_MS = 15000       # мс ожиданий на действия
+RETRIES = 2              # доп. попытки на один чат (в сумме 1 + RETRIES)
+POST_SEND_PAUSE_MS = 300 # пауза после отправки
 
-# Необязательный прокси: задайте в окружении PLAYWRIGHT_PROXY, например:
-#   setx PLAYWRIGHT_PROXY http://user:pass@proxy.corp.local:8080
+# Необязательный прокси: задайте в окружении PLAYWRIGHT_PROXY
 PLAYWRIGHT_PROXY = os.getenv("PLAYWRIGHT_PROXY")
 
 # ==================== ВСПОМОГАТЕЛЬНО ====================
@@ -46,9 +45,8 @@ async def get_widget_frame(page: Page) -> Frame:
     Иногда element виден, но frame ещё не прикреплён — добавлен мини-луп.
     """
     iframe_el = await page.wait_for_selector(SEL_IFRAME, state="visible", timeout=TIMEOUT_MS)
-    frame = await iframe_el.content_frame()  # ВАЖНО: await
+    frame = await iframe_el.content_frame()
     if frame is None:
-        # небольшой луп, если контент фрейма прикрепляется с задержкой
         for _ in range(20):
             await asyncio.sleep(0.05)
             frame = await iframe_el.content_frame()
@@ -68,25 +66,29 @@ async def run_chat_flow(frame: Frame, index: int) -> None:
     # старт
     await frame.click(SEL_BTN_START, timeout=TIMEOUT_MS)
 
-    # сообщение
-    await frame.click(SEL_INPUT_MESSAGE, timeout=TIMEOUT_MS)
-    await frame.fill(SEL_INPUT_MESSAGE, f"{MESSAGE_TEXT} #{index}", timeout=TIMEOUT_MS)
+    # === несколько сообщений подряд (3–7) ===
+    count = random.randint(3, 7)
+    for j in range(count):
+        msg = f"{MESSAGE_TEXT} #{index}.{j+1}"
 
-    # отправка
-    await frame.wait_for_selector(SEL_SEND_ICONS, timeout=TIMEOUT_MS)
-    icons = await frame.query_selector_all(SEL_SEND_ICONS)
-    target = icons[1] if len(icons) > 1 else icons[0]
-    await target.click()
+        await frame.click(SEL_INPUT_MESSAGE, timeout=TIMEOUT_MS)
+        await frame.fill(SEL_INPUT_MESSAGE, msg, timeout=TIMEOUT_MS)
 
-    # подождать доставку
-    await frame.wait_for_timeout(POST_SEND_PAUSE_MS)
+        await frame.wait_for_selector(SEL_SEND_ICONS, timeout=TIMEOUT_MS)
+        icons = await frame.query_selector_all(SEL_SEND_ICONS)
+        target = icons[1] if len(icons) > 1 else icons[0]
+        await target.click()
 
-    # закрыть чат
-    try:
-        await frame.click(SEL_CLOSE_BUTTON, timeout=3000)
-        print(f"[OK] Chat #{index} closed")
-    except Exception:
-        print(f"[WARN] Chat #{index}: кнопка закрытия не найдена")
+        await frame.wait_for_timeout(POST_SEND_PAUSE_MS)
+
+    # === закрытие пока закомментировано ===
+    # try:
+    #     await frame.click(SEL_CLOSE_BUTTON, timeout=3000)
+    #     print(f"[OK] Chat #{index} closed")
+    # except Exception:
+    #     print(f"[WARN] Chat #{index}: кнопка закрытия не найдена")
+
+    print(f"[OK] Chat #{index}: отправлено {count} сообщений")
 
 async def one_chat(context, index: int) -> bool:
     page = await context.new_page()
@@ -96,7 +98,6 @@ async def one_chat(context, index: int) -> bool:
         frame = await get_widget_frame(page)
         await run_chat_flow(frame, index)
         await page.wait_for_timeout(POST_SEND_PAUSE_MS)
-        print(f"[OK] Chat #{index}")
         return True
     except PWTimeout:
         print(f"[TIMEOUT] Chat #{index}")
@@ -113,7 +114,6 @@ async def launch_browser():
 
     launch_kwargs = {"headless": True}
     if PLAYWRIGHT_PROXY:
-        # Явный прокси, если требуется корпоративной сетью
         launch_kwargs["proxy"] = {"server": PLAYWRIGHT_PROXY}
 
     browser = await pw.chromium.launch(**launch_kwargs)
@@ -131,18 +131,16 @@ async def run():
         async def worker(i: int):
             nonlocal success
             async with sem:
-                # Один браузер — много изолированных контекстов
                 context = await browser.new_context(
-                    ignore_https_errors=True,              # полезно для тестового TLS
+                    ignore_https_errors=True,
                     viewport={"width": 1366, "height": 900},
                 )
                 try:
-                    for attempt in range(1, RETRIES + 2):  # первая попытка + ретраи
+                    for attempt in range(1, RETRIES + 2):
                         ok = await one_chat(context, i)
                         if ok:
                             success += 1
                             break
-                        # небольшой экспоненциальный бэкофф
                         await asyncio.sleep(0.25 * attempt)
                 finally:
                     await context.close()
