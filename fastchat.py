@@ -13,7 +13,7 @@ from playwright.async_api import (
 )
 
 # ====================== НАСТРОЙКИ ======================
-WIDGET_URL = "https://ww-host.test.vivai.ai/089e18fd-af9a-4bbe-9f18-7810a27dfed6"
+WIDGET_URL = "https://redirect.test.vivai.ai/30a8e3fa-8ed6-4b6a-a547-5445037e5414"
 
 # Селекторы: обновляйте при смене билдов/классов виджета
 SEL_IFRAME = 'iframe'                 # можно уточнить: iframe[title="Chat Widget"]
@@ -23,7 +23,7 @@ SEL_BTN_START = ".key-t91e19"         # Start chat
 SEL_INPUT_MESSAGE = ".key-jml02v"
 SEL_SEND_ICONS = "svg.key-b44e5x"     # как правило, 2-я иконка — отправка
 SEL_CLOSE_BUTTON = ".key-1cfsorn"     # для закрытия
-TOTAL_CHATS = 10         # всего сессий
+TOTAL_CHATS = 200         # всего сессий
 CONCURRENCY = 50         # одновременных сессий
 MESSAGE_TEXT = "Test message"
 TIMEOUT_MS = 15000       # мс ожиданий на действия
