@@ -274,7 +274,8 @@ def start_chat(index: int = 0):
     start_time = time.time()  # отметка старта
     try:
         print("1) Логин…")
-        driver.get("https://gpt3.uat.vivai.ai/auth/login?returnUrl=%2Fdashboard")
+        url = os.getenv("VIVAI_URL", "")
+        driver.get(url)
 
         username = os.getenv("VIVAI_USER", "")
         password = os.getenv("VIVAI_PASS", "")
