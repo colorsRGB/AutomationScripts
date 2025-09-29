@@ -10,8 +10,10 @@ from selenium.webdriver.chrome.options import Options
 import os, time, random, json
 import time
 
-
-
+# ===== Параметры «серых» карточек (настройка) =====
+GREY_WAIT_TIMEOUT   = 4.0   # сколько ждать, что текущая карточка посереет после закрытия
+GREY_EXTRA_PAUSE    = 0.7   # дополнительная пауза стабилизации, если карточка таки посерела
+TOP_CARD_RECHECK_PAUSE = 0.6  # пауза перед проверкой первой карточки в списке
 
 # ===== Константы (локаторы) =====
 # карточки чатов в колонке
@@ -28,6 +30,12 @@ SEND_SPAN_LOC  = (By.XPATH, "//span[normalize-space()='Send']")
 CLOSE_SPAN_LOC = (By.XPATH, "//span[normalize-space()='Close']")
 
 # ===== Утилиты =====
+def _visible(driver, locator):
+    try:
+        el = driver.find_element(*locator)
+        return el.is_displayed()
+    except Exception:
+        return False
 def _rand_token(k: int = 5):
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     return "".join(random.choice(alphabet) for _ in range(k))
@@ -54,6 +62,52 @@ def _button_from_span(driver, span_loc):
         return span.find_element(By.XPATH, "ancestor::button[1]")
     except Exception:
         return span.find_element(By.XPATH, "ancestor::*[contains(@class,'p-button')][1]")
+# --- альтернативные локаторы для кнопки отправки ---
+SEND_BUTTON_CANDIDATES = [
+    (By.XPATH, "//span[normalize-space()='Send']/ancestor::button[1]"),
+    (By.XPATH, "//button[@type='submit' and .//span[normalize-space()='Send']]"),
+    (By.XPATH, "//button[@type='submit' and not(@disabled)]"),
+    (By.XPATH, "//button[.//*[contains(@class,'pi-send') or contains(@class,'icon-send')]]"),
+]
+
+def _find_send_button(driver):
+    """Вернуть первый подходящий видимый/включённый <button> Send по кандидатам."""
+    for loc in SEND_BUTTON_CANDIDATES:
+        try:
+            btn = driver.find_element(*loc)
+            if btn.is_displayed():
+                return btn
+        except Exception:
+            continue
+    # как последний шанс — старый путь через span
+    try:
+        return _button_from_span(driver, SEND_SPAN_LOC)
+    except Exception:
+        return None
+
+def _wait_send_enabled(driver, timeout=4.0, period=0.2) -> bool:
+    """Пуллинг: находим кнопку каждый раз заново и проверяем enabled."""
+    end = time.time() + timeout
+    while time.time() < end:
+        btn = _find_send_button(driver)
+        if btn:
+            try:
+                cls  = (btn.get_attribute("class") or "").lower()
+                aria = (btn.get_attribute("aria-disabled") or "").lower()
+                hard = btn.get_attribute("disabled") is not None
+                if not (hard or "p-disabled" in cls or "p-button-loading" in cls or aria == "true"):
+                    return True
+            except Exception:
+                pass
+        time.sleep(period)
+    return False
+
+def _try_press_enter_to_send(field) -> None:
+    """Отправка по Enter — если UI это поддерживает."""
+    try:
+        field.send_keys(Keys.ENTER)
+    except Exception:
+        pass
 
 def _is_btn_disabled(btn):
     cls  = (btn.get_attribute("class") or "").lower()
@@ -155,6 +209,44 @@ def _find_ws_or_xhr_with_token(driver, token: str, timeout: int = 60) -> bool:
         time.sleep(0.3)
     return False
 
+# ===== >>> добавлено для серых карточек =====
+def _card_is_grey(card) -> bool:
+    """Эвристика «серой» карточки: класс, бэйдж или текст."""
+    try:
+        cls = (card.get_attribute("class") or "").lower()
+        if "closed-item-light" in cls or "closed" in cls:
+            return True
+        # бэйдж Closed
+        if card.find_elements(By.XPATH, ".//span[contains(@class,'badge') and contains(translate(., 'CLOSED', 'closed'),'closed')]"):
+            return True
+        # текстовая эвристика
+        text = (card.text or "").lower()
+        if "closed" in text:
+            return True
+    except Exception:
+        pass
+    return False
+
+def _is_selected(card) -> bool:
+    try:
+        return "selected" in ((card.get_attribute("class") or "").lower())
+    except Exception:
+        return False
+
+def _wait_card_turns_grey(card, timeout=GREY_WAIT_TIMEOUT) -> bool:
+    """Ждём, что переданная карточка станет серой (после закрытия)."""
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            if _card_is_grey(card):
+                return True
+        except Exception:
+            # карточку могли пересоздать — считаем, что обновилась/исчезла
+            return True
+        time.sleep(0.2)
+    return False
+# ===== <<< добавлено для серых карточек =====
+
 # ===== Отправка сообщений (подтверждение по сетевому событию) =====
 def send_messages(driver, wait, count: int) -> int:
     sent = 0
@@ -178,31 +270,70 @@ def send_messages(driver, wait, count: int) -> int:
             )
         _set_text_and_fire_input(driver, field, msg)
 
-        # ждём активную Send
-        try:
-            WebDriverWait(driver, 10).until(lambda d: _is_send_enabled(d))
-        except TimeoutException:
-            field.send_keys(" ", Keys.BACKSPACE)
-            WebDriverWait(driver, 10).until(lambda d: _is_send_enabled(d))
+        # --- 1) ждём коротко кнопку Send; если не активна — пробуем отправку по Enter
+        if not _wait_send_enabled(driver, timeout=3.0):
+            # иногда нужно «шевельнуть» инпут, чтобы включить валидацию
+            try:
+                _set_text_and_fire_input(driver, field, msg + " ")
+                _set_text_and_fire_input(driver, field, msg)
+            except Exception:
+                pass
 
-        # чистим буфер логов и кликаем
+            # ещё раз подождать кнопку
+            if not _wait_send_enabled(driver, timeout=2.0):
+                # план Б: отправка по Enter
+                _try_press_enter_to_send(field)
+                # если отправилось — в логах появится наш токен; перейдём к подтверждению
+                # иначе ниже ещё попробуем кликом (на случай, если кнопка всё-таки ожила)
+
+        # --- 2) попытка нажать кнопку (если она есть и включена)
+        btn = _find_send_button(driver)
+        if btn:
+            try:
+                driver.execute_script("arguments[0].click();", btn)
+            except Exception:
+                # как запасной вариант — обычный click()
+                try:
+                    btn.click()
+                except Exception:
+                    pass
+        else:
+            # кнопки не нашли — надеемся, что Enter уже сработал
+            pass
+
+        # --- 3) подтверждаем по WebSocket/XHR
         _clear_perf_logs(driver)
-        btn = _button_from_span(driver, SEND_SPAN_LOC)
-        driver.execute_script("arguments[0].click();", btn)
-
-        # подтверждаем по WebSocket/XHR
         if _find_ws_or_xhr_with_token(driver, token, timeout=60):
             sent += 1
             print(f"   ✓ отправлено: {sent}/{count}")
-        else:
-            print(f"   ⚠️ не получили сетевое событие с токеном [{token}] — прерываю цикл")
-            break
+            time.sleep(0.3)
+            continue
 
-        time.sleep(0.3)
+        # --- 4) ре-трай: снова «пнуть» инпут и ещё раз нажать
+        try:
+            _set_text_and_fire_input(driver, field, msg + " ")
+            _set_text_and_fire_input(driver, field, msg)
+            # попробовать ещё раз кнопку
+            btn = _find_send_button(driver)
+            if btn:
+                driver.execute_script("arguments[0].click();", btn)
+            else:
+                _try_press_enter_to_send(field)
+
+            if _find_ws_or_xhr_with_token(driver, token, timeout=10):
+                sent += 1
+                print(f"   ✓ отправлено (retry): {sent}/{count}")
+                time.sleep(0.3)
+                continue
+        except Exception:
+            pass
+
+        print(f"   ⚠️ не получили сетевое подтверждение для [{token}] — прерываю цикл")
+        break
 
     return sent
 
-# ===== Закрытие чата (только после полного цикла) =====
+# ===== Закрытие чата (с ожиданием «поседения») =====
 def _is_checked(box_div):
     cls = (box_div.get_attribute("class") or "").lower()
     if "p-highlight" in cls or "checked" in cls:
@@ -235,7 +366,7 @@ def _pick_first_reason_if_needed(driver, wait):
         WebDriverWait(driver, 5).until(lambda d: "select" not in driver.find_element(*label_loc).text.lower())
 
 def close_chat(driver, wait):
-    """Close → Yes → Submit → OK."""
+    """Close → Yes → Submit → OK → ждём серую карточку → пауза стабилизации."""
     close_btn = _button_from_span(driver, CLOSE_SPAN_LOC)
     driver.execute_script("arguments[0].click();", close_btn)
 
@@ -244,7 +375,18 @@ def close_chat(driver, wait):
     submit_btn_loc = (By.XPATH, "//span[normalize-space()='Submit']")
     ok_btn_loc     = (By.XPATH, "//button[normalize-space()='OK']")
 
-    # Ставим "Yes" (и снимаем "No", если он вдруг выбран)
+    # сохраним ссылку на текущую выбранную карточку (для ожидания «поседения»)
+    selected_card = None
+    try:
+        all_cards = driver.find_elements(By.XPATH, ONGOING_CHATS_XPATH)
+        for c in all_cards:
+            if _is_selected(c):
+                selected_card = c
+                break
+    except Exception:
+        pass
+
+    # Yes/No
     _ensure_checkbox(driver, wait, yes_box_loc, True)
     _ensure_checkbox(driver, wait, no_box_loc,  False)
 
@@ -264,8 +406,14 @@ def close_chat(driver, wait):
         WebDriverWait(driver, 5).until(EC.invisibility_of_element_located(INPUT_LOC))
     except TimeoutException:
         pass
-    time.sleep(0.5)
 
+    # >>> добавлено: ждём, что карточка посереет, и даём небольшую паузу стабилизации
+    if selected_card is not None:
+        if _wait_card_turns_grey(selected_card, timeout=GREY_WAIT_TIMEOUT):
+            time.sleep(GREY_EXTRA_PAUSE)
+    # <<< добавлено
+
+    time.sleep(0.2)  # общая микро-пауза
 
 # ===== Основная функция =====
 def start_chat(index: int = 0):
@@ -298,6 +446,7 @@ def start_chat(index: int = 0):
         driver.execute_script("arguments[0].click();", avatar)
 
         print("4) Do not accept chats → Accepting chats…")
+        time.sleep(5.3)
         if quick_present(driver, (By.XPATH, "//div[contains(text(),'Do not accept chats')]")):
             driver.find_element(By.XPATH, "//div[contains(text(),'Do not accept chats')]").click()
         if quick_present(driver, (By.XPATH, "//div[contains(text(),'Accepting chats')]")):
@@ -316,14 +465,33 @@ def start_chat(index: int = 0):
                 print("Список чатов не загрузился ❌")
                 break
 
+            # >>> добавлено: отбрасываем серые/закрытые/выбранные карточки
             candidate = None
             for c in cards:
-                cls = (c.get_attribute("class") or "").lower()
-                text = (c.text or "").lower()
-                if "selected" in cls or "closed" in text:
+                if _is_selected(c) or _card_is_grey(c):
                     continue
+                # дополнительная текстовая эвристика (если вдруг класс не прогрузился)
+                try:
+                    if "closed" in ((c.text or "").lower()):
+                        continue
+                except Exception:
+                    pass
                 candidate = c
                 break
+            # <<< добавлено
+
+            if not candidate:
+                # >>> добавлено: дайте списку обновиться и перепроверьте «первую» карточку
+                time.sleep(TOP_CARD_RECHECK_PAUSE)
+                try:
+                    cards = driver.find_elements(By.XPATH, ONGOING_CHATS_XPATH)
+                    if cards:
+                        first = cards[0]
+                        if not _is_selected(first) and not _card_is_grey(first) and "closed" not in ((first.text or "").lower()):
+                            candidate = first
+                except Exception:
+                    pass
+                # <<< добавлено
 
             if not candidate:
                 print("Нет доступных чатов. Готово ✅")
@@ -352,15 +520,10 @@ def start_chat(index: int = 0):
                 print(f"❌ Отправлено только {sent}/{n}. Чат НЕ закрываю — следующий.")
                 continue
 
-
     finally:
-
         elapsed = time.time() - start_time
-
         minutes, seconds = divmod(int(elapsed), 60)
-
         print(f"⏱ Время выполнения: {minutes} мин {seconds} сек")
-
         driver.quit()
 
 # ===== Точка входа =====
