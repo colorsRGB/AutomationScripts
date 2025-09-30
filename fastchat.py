@@ -23,8 +23,8 @@ SEL_BTN_START = ".key-t91e19"         # Start chat
 SEL_INPUT_MESSAGE = ".key-jml02v"
 SEL_SEND_ICONS = "svg.key-b44e5x"     # как правило, 2-я иконка — отправка
 SEL_CLOSE_BUTTON = ".key-1cfsorn"     # для закрытия
-TOTAL_CHATS = 200         # всего сессий
-CONCURRENCY = 50         # одновременных сессий
+TOTAL_CHATS = 1000       # всего сессий
+CONCURRENCY = 20       # одновременных сессий
 MESSAGE_TEXT = "Test message"
 TIMEOUT_MS = 15000       # мс ожиданий на действия
 RETRIES = 2              # доп. попытки на один чат (в сумме 1 + RETRIES)
@@ -67,7 +67,7 @@ async def run_chat_flow(frame: Frame, index: int) -> None:
     await frame.click(SEL_BTN_START, timeout=TIMEOUT_MS)
 
     # === несколько сообщений подряд (3–7) ===
-    count = random.randint(3, 7)
+    count = random.randint(2, 7)
     for j in range(count):
         msg = f"{MESSAGE_TEXT} #{index}.{j+1}"
 
